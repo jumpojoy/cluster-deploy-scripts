@@ -1,0 +1,63 @@
+# Save trace setting
+_XTRACE_LIB_RECLASS=$(set +o | grep xtrace)
+set +o xtrace
+
+function configure_nodes_cfg {
+
+if ! [[ -d /srv/salt/reclass/nodes/_generated/ ]]; then
+  sudo mkdir -p /srv/salt/reclass/nodes/_generated/
+fi
+
+cat <<-EOF > /srv/salt/reclass/nodes/_generated/${LOCAL_HOSTNAME}.${LOCAL_DOMAINNAME}.yml
+	classes:
+	- cluster.${CLUSTER_NAME}.infra.config
+	parameters:
+	  _param:
+	    salt_master_host: ${SALT_MASTER_HOST}
+	    salt_master_base_environment: base
+	    reclass_data_revision: ${RECLASS_REVISION}
+	    reclass_data_repository: "$RECLASS_ADDRESS"
+	    reclass_config_master: ${SALT_MASTER_HOST}
+	    linux_system_codename: ${DISTRIB_CODENAME}
+	    cluster_name: ${CLUSTER_NAME}
+	    cluster_domain: ${DOMAIN:-$CLUSTER_NAME.local}
+	  linux:
+	    system:
+	      name: ${LOCAL_HOSTNAME}
+	      domain: ${LOCAL_DOMAINNAME}
+	# ########
+EOF
+
+}
+
+function configure_reclass_pre {
+
+  if ! [[ -d /etc/reclass ]]; then
+    sudo mkdir /etc/reclass/
+  fi
+
+  cat <<-EOF > /etc/reclass/reclass-config.yml
+    storage_type: yaml_fs
+    pretty_print: True
+    output: yaml
+    inventory_base_uri: /srv/salt/reclass
+EOF
+
+}
+
+function configure_reclass {
+   echo "Configuring reclass"
+   
+}
+
+
+function install_reclass {
+  install_package 'reclass'
+  configure_reclass_pre
+  configure_reclass
+  restart_service salt-master
+  configure_nodes_cfg
+}
+
+# Restore xtrace
+$_XTRACE_LIB_RECLASS

@@ -1,0 +1,49 @@
+# Save trace setting
+_XTRACE_LIB_SALT=$(set +o | grep xtrace)
+set +o xtrace
+
+function configure_salt_master {
+  echo "Configuring salt master"
+cat <<-EOF > /etc/salt/master.d/master.conf
+file_roots:
+  base:
+  - /usr/share/salt-formulas/env
+  prd:
+  - /srv/salt/env/prd
+  dev:
+  - /srv/salt/env/dev
+pillar_opts: False
+open_mode: True
+reclass: &reclass
+  storage_type: yaml_fs
+  inventory_base_uri: /srv/salt/reclass
+ext_pillar:
+  - reclass: *reclass
+master_tops:
+  reclass: *reclass
+
+id: ${SALT_MASTER_ID}
+EOF
+
+}
+function configure_salt_minion {
+cat <<-EOF > /etc/salt/minion.d/minion.conf
+master: ${SALT_MASTER_IP}
+id: ${SALT_MINION_ID}
+EOF
+}
+
+function install_salt_master {
+  install_package 'salt-master'
+  configure_salt_master
+  restart_service 'salt-master'
+}
+
+function install_salt_minion {
+  install_package 'salt-minion'
+  configure_salt_minion
+  restart_service 'salt-minion'
+}
+
+# Restore xtrace
+$_XTRACE_LIB_SALT

@@ -1,0 +1,273 @@
+# Save trace setting
+_XTRACE_FUNCTIONS_COMMON=$(set +o | grep xtrace)
+set +o xtrace
+
+# ensure we don't re-source this in the same environment
+[[ -z "$_SALT_FUNCTIONS_COMMON" ]] || return 0
+declare -r -g _SALT_FUNCTIONS_COMMON=1
+
+declare -A -g _TIME_TOTAL
+declare -A -g _TIME_START
+declare -r -g _TIME_BEGIN=$(date +%s)
+
+# time_start $name
+#
+# starts the clock for a timer by name. Errors if that clock is
+# already started.
+function time_start {
+    local name=$1
+    local start_time=${_TIME_START[$name]}
+    if [[ -n "$start_time" ]]; then
+        die $LINENO "Trying to start the clock on $name, but it's already been started"
+    fi
+    _TIME_START[$name]=$(date +%s%3N)
+}
+
+# time_stop $name
+#
+# stops the clock for a timer by name, and accumulate that time in the
+# global counter for that name. Errors if that clock had not
+# previously been started.
+function time_stop {
+    local name
+    local end_time
+    local elapsed_time
+    local total
+    local start_time
+
+    name=$1
+    start_time=${_TIME_START[$name]}
+
+    if [[ -z "$start_time" ]]; then
+        die $LINENO "Trying to stop the clock on $name, but it was never started"
+    fi
+    end_time=$(date +%s%3N)
+    elapsed_time=$(($end_time - $start_time))
+    total=${_TIME_TOTAL[$name]:-0}
+    # reset the clock so we can start it in the future
+    _TIME_START[$name]=""
+    _TIME_TOTAL[$name]=$(($total + $elapsed_time))
+}
+
+# Prints backtrace info
+# filename:lineno:function
+# backtrace level
+function backtrace {
+    local level=$1
+    local deep
+    deep=$((${#BASH_SOURCE[@]} - 1))
+    echo "[Call Trace]"
+    while [ $level -le $deep ]; do
+        echo "${BASH_SOURCE[$deep]}:${BASH_LINENO[$deep-1]}:${FUNCNAME[$deep-1]}"
+        deep=$((deep - 1))
+    done
+}
+
+# Prints line number and "message" in error format
+# err $LINENO "message"
+function err {
+    local exitcode=$?
+    local xtrace
+    xtrace=$(set +o | grep xtrace)
+    set +o xtrace
+    local msg="[ERROR] ${BASH_SOURCE[2]}:$1 $2"
+    echo $msg 1>&2;
+    if [[ -n ${LOGDIR} ]]; then
+        echo $msg >> "${LOGDIR}/error.log"
+    fi
+    $xtrace
+    return $exitcode
+}
+
+
+# Prints line number and "message" then exits
+# die $LINENO "message"
+function die {
+    local exitcode=$?
+    set +o xtrace
+    local line=$1; shift
+    if [ $exitcode == 0 ]; then
+        exitcode=1
+    fi
+    backtrace 2
+    err $line "$*"
+    # Give buffers a second to flush
+    sleep 1
+    exit $exitcode
+}
+
+# Checks an environment variable is not set or has length 0 OR if the
+# exit code is non-zero and prints "message" and exits
+# NOTE: env-var is the variable name without a '$'
+# die_if_not_set $LINENO env-var "message"
+function die_if_not_set {
+    local exitcode=$?
+    local xtrace
+    xtrace=$(set +o | grep xtrace)
+    set +o xtrace
+    local line=$1; shift
+    local evar=$1; shift
+    if ! is_set $evar || [ $exitcode != 0 ]; then
+        die $line "$*"
+    fi
+    $xtrace
+}
+
+# Checks an environment variable is not set or has length 0 OR if the
+# exit code is non-zero and prints "message" and exits
+# NOTE: env-var is the variable name without a '$'
+# die_if_not_set $LINENO env-var "message"
+function die_if_not_set {
+    local exitcode=$?
+    local xtrace
+    xtrace=$(set +o | grep xtrace)
+    set +o xtrace
+    local line=$1; shift
+    local evar=$1; shift
+    if ! is_set $evar || [ $exitcode != 0 ]; then
+        die $line "$*"
+    fi
+    $xtrace
+}
+
+# Add extra repos with specified priority and pinning to APT
+add_extra_repo_deb() {
+  local bootstap_params=$1
+  local IFS=';'
+  local param_str
+  local repo_counter=0
+  for param_str in $bootstap_params; do
+    IFS=','
+    local repo_param=($param_str)
+    local repo=${repo_param[0]}
+    local prio=${repo_param[1]}
+    local pin=${repo_param[2]}
+    local repo_gpg_key=${repo_param[3]}
+    echo $repo > /etc/apt/sources.list.d/bootstrap_extra_repo_${repo_counter}.list
+    if [[ "$prio" != "" && "$pin" != "" ]]; then
+      echo -e "\nPackage: *\nPin: ${pin}\nPin-Priority: ${prio}\n" > /etc/apt/preferences.d/bootstrap_extra_repo_${repo_counter}
+    fi
+    if [[ "$repo_gpg_key" != "" ]]; then
+      curl -sL $repo_gpg_key | sudo apt-key add -
+    fi
+
+    repo_counter=`expr $repo_counter + 1`
+  done
+}
+
+# Wrapper for ``apt-get`` to set cache and proxy environment variables
+# Uses globals ``OFFLINE``, ``*_proxy``
+# apt_get operation package [package ...]
+function apt_get {
+    local xtrace result
+    xtrace=$(set +o | grep xtrace)
+    set +o xtrace
+
+    [[ -z "$@" ]] && return
+    local sudo="sudo"
+    [[ "$(id -u)" = "0" ]] && sudo="env"
+
+    # time all the apt operations
+    time_start "apt-get"
+
+    $xtrace
+
+    local install_cmd="$sudo DEBIAN_FRONTEND=noninteractive \
+        http_proxy=${http_proxy:-} https_proxy=${https_proxy:-} \
+        no_proxy=${no_proxy:-} \
+        apt-get --option \"Dpkg::Options::=--force-confold\" --assume-yes $@ < /dev/null";
+
+    if ! timeout 300 sh -c "while ! $install_cmd; do sleep 30; done"; then
+      result=$?
+    fi
+
+    # stop the clock
+    time_stop "apt-get"
+    return $result
+}
+
+# Uses global ``ENABLED_SERVICES``
+# is_service_enabled service [service ...]
+function is_service_enabled {
+    local xtrace
+    xtrace=$(set +o | grep xtrace)
+    set +o xtrace
+
+    local enabled=1
+    local services=$@
+    local service
+    for service in ${services}; do
+        [[ ,${ENABLED_SERVICES}, =~ ,${service}, ]] && enabled=0
+    done
+
+    $xtrace
+    return $enabled
+}
+
+# Wrapper for ``apt-get update`` to try multiple times on the update
+# to address bad package mirrors (which happen all the time).
+function apt_get_update {
+    # only do this once per run
+    if [[ "$REPOS_UPDATED" == "True" && "$RETRY_UPDATE" != "True" ]]; then
+        return
+    fi
+
+    local sudo="sudo"
+    [[ "$(id -u)" = "0" ]] && sudo="env"
+
+    # time all the apt operations
+    time_start "apt-get-update"
+
+    local proxies="http_proxy=${http_proxy:-} https_proxy=${https_proxy:-} no_proxy=${no_proxy:-} "
+    local update_cmd="$sudo $proxies apt-get update"
+    if ! timeout 300 sh -c "while ! $update_cmd; do sleep 30; done"; then
+        die $LINENO "Failed to update apt repos, we're dead now"
+    fi
+
+    REPOS_UPDATED=True
+    # stop the clock
+    time_stop "apt-get-update"
+}
+
+# Distro-agnostic package installer
+# Uses globals ``NO_UPDATE_REPOS``, ``REPOS_UPDATED``, ``RETRY_UPDATE``
+# install_package package [package ...]
+function update_package_repo {
+    NO_UPDATE_REPOS=${NO_UPDATE_REPOS:-False}
+    REPOS_UPDATED=${REPOS_UPDATED:-False}
+    RETRY_UPDATE=${RETRY_UPDATE:-False}
+
+    if [[ "$NO_UPDATE_REPOS" = "True" ]]; then
+        return 0
+    fi
+
+    apt_get_update
+}
+
+# Distro-agnostic package installer
+# install_package package [package ...]
+function install_package {
+  update_package_repo
+  apt_get install "$@"
+}
+
+# Service wrapper to restart services
+# restart_service service-name
+function restart_service {
+    if [ -x /bin/systemctl ]; then
+        sudo /bin/systemctl restart $1
+    else
+        sudo service $1 restart
+    fi
+
+}
+
+function default_host_ip {
+  local default_int=$(ip route |awk '/default/ {print $5}')
+  local default_ip=$(ip addr show $default_int | awk '/inet / {split($2, a, "/"); print a[1]}'|  head -1)
+  echo "$default_ip"
+}
+
+
+# Restore xtrace
+$_XTRACE_FUNCTIONS_COMMON

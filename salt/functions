@@ -1,0 +1,9 @@
+# Save trace setting
+_XTRACE_FUNCTIONS=$(set +o | grep xtrace)
+set +o xtrace
+
+# ensure we don't re-source this in the same environment
+[[ -z "$_SALT_FUNCTIONS" ]] || return 0
+declare -r -g _SALT_FUNCTIONS=1
+
+
